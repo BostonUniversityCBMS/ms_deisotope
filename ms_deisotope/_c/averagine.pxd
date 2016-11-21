@@ -1,4 +1,6 @@
 
+cdef double PROTON
+
 cdef double mass_charge_ratio(double neutral_mass, int z, double charge_carrier=*)
 cdef double neutral_mass(double mz,  int z, double charge_carrier=*)
 cdef void slide(double mz, list peaklist)
@@ -18,6 +20,7 @@ cdef class AveragineCache(object):
     cdef:
         public dict backend
         public Averagine averagine
+        public double cache_truncation
     
     cdef list has_mz_charge_pair(self, double mz, int charge=*, double charge_carrier=*, double truncate_after=*)
     cpdef list isotopic_cluster(self, double mz, int charge=*, double charge_carrier=*, double truncate_after=*)

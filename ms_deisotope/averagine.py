@@ -3,7 +3,8 @@ from brainpy import calculate_mass, neutral_mass, PROTON, isotopic_variants, mas
 
 from .utils import dict_proxy
 
-def slide(mz, cluster):
+
+def shift_isotopic_pattern(mz, cluster):
     first_peak = cluster[0]
     for peak in cluster[1:]:
         delta = (peak.mz - first_peak.mz)
@@ -37,7 +38,7 @@ class Averagine(object):
 
         return scaled
 
-    def isotopic_cluster(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.98):
+    def isotopic_cluster(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.95):
         composition = self.scale(mz, charge, charge_carrier)
         cumsum = 0
         result = []
@@ -46,7 +47,7 @@ class Averagine(object):
             result.append(peak)
             if cumsum >= truncate_after:
                 break
-        return slide(mz, result)
+        return shift_isotopic_pattern(mz, result)
 
     def __repr__(self):
         return "Averagine(%r)" % self.base_composition
@@ -76,6 +77,7 @@ def add_compositions(a, b):
         a[k] += v
     return dict(a)
 
+
 try:
     _Averagine = Averagine
     from ms_deisotope._c.averagine import Averagine
@@ -86,6 +88,7 @@ except ImportError, e:
 peptide = Averagine({"C": 4.9384, "H": 7.7583, "N": 1.3577, "O": 1.4773, "S": 0.0417})
 glycopeptide = Averagine({"C": 10.93, "H": 15.75, "N": 1.6577, "O": 6.4773, "S": 0.02054})
 glycan = Averagine({'C': 7.0, 'H': 11.8333, 'N': 0.5, 'O': 5.16666})
+permethylated_glycan = Averagine({'C': 12.0, 'H': 21.8333, 'N': 0.5, 'O': 5.16666})
 
 
 _neutron_shift = calculate_mass({"C[13]": 1}) - calculate_mass({"C[12]": 1})
@@ -97,17 +100,20 @@ def isotopic_shift(charge=1):
 
 @dict_proxy("averagine")
 class AveragineCache(object):
-    def __init__(self, averagine, backend=None, mz_precision=8):
+    def __init__(self, averagine, backend=None, cache_truncation=1.0):
         if backend is None:
             backend = {}
         self.backend = backend
         self.averagine = Averagine(averagine)
-        self.mz_precision = mz_precision
+        self.cache_truncation = cache_truncation
 
-    def has_mz_charge_pair(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.98):
-        key_mz = round(mz)
+    def has_mz_charge_pair(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.95):
+        if self.cache_truncation == 0.0:
+            key_mz = mz
+        else:
+            key_mz = round(mz / self.cache_truncation) * self.cache_truncation
         if (key_mz, charge, charge_carrier) in self.backend:
-            return slide(mz, [p.clone() for p in self.backend[key_mz, charge, charge_carrier]])
+            return shift_isotopic_pattern(mz, [p.clone() for p in self.backend[key_mz, charge, charge_carrier]])
         else:
             tid = self.averagine.isotopic_cluster(mz, charge, charge_carrier, truncate_after)
             self.backend[key_mz, charge, charge_carrier] = [p.clone() for p in tid]
@@ -117,6 +123,9 @@ class AveragineCache(object):
 
     def __repr__(self):
         return "AveragineCache(%r)" % self.averagine
+
+    def clear(self):
+        self.backend.clear()
 
 
 try:
