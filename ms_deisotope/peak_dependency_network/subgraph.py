@@ -12,7 +12,8 @@ class FitNode(SpanningMixin):
         self.fit = fit
         self.edges = set()
         self.overlap_edges = set()
-        self.peak_indices = {p.peak_count for p in fit.experimental if p.peak_count > 0}
+        # Placeholder Peaks have a peak_count of -1
+        self.peak_indices = {p.peak_count for p in fit.experimental if p.peak_count >= 0}
         self._hash = None
         self.score = fit.score
         self.start = fit.experimental[0].mz
@@ -91,14 +92,14 @@ def layout_layers(envelopes, overlap_fn=peak_overlap, maximize=True):
 
 
 class GreedySubgraphSelection(object):
-    def __init__(self, subgraph, maximize=True):
+    def __init__(self, subgraph, maximize=True, overlap_fn=peak_overlap):
         self.intervals = list(subgraph)
         self._layers = [[]]
         self.maximize = maximize
-        self._build_layers()
+        self._build_layers(overlap_fn=overlap_fn)
 
-    def _build_layers(self):
-        self._layers = layout_layers(self.intervals, maximize=self.maximize)
+    def _build_layers(self, overlap_fn):
+        self._layers = layout_layers(self.intervals, overlap_fn=overlap_fn, maximize=self.maximize)
 
     def _select_best_subset(self):
         return self._layers[0]
@@ -107,13 +108,13 @@ class GreedySubgraphSelection(object):
         return self._select_best_subset()
 
     @classmethod
-    def solve(cls, nodes, maximize=True):
-        solver = cls(nodes, maximize=maximize)
+    def solve(cls, nodes, maximize=True, overlap_fn=peak_overlap):
+        solver = cls(nodes, maximize=maximize, overlap_fn=overlap_fn)
         solution = solver.select()
         return solution
 
 
-class ExhaustiveDisjointSolutionSelection(object):
+class ExhaustiveDisjointSolutionSelection(object):  # pragma: no cover
     shard_size = 7
 
     def __init__(self, active_set, remaining_components, solutions=None, parent=None, score=None):

@@ -1,12 +1,11 @@
+from __future__ import print_function
 import operator
-import math
-
-from collections import defaultdict
-
+import random
+from datetime import datetime
 
 try:
     from matplotlib import pyplot as plt
-    from ms_peak_picker.utils import draw_peaklist
+    from ms_peak_picker.utils import draw_peaklist, draw_raw
     has_plot = True
 
 except ImportError:
@@ -14,8 +13,41 @@ except ImportError:
 
 try:
     range = xrange
-except:
+except NameError:
     range = range
+
+
+try:  # pragma: no cover
+    i128 = long
+    basestring = basestring
+except NameError:  # pragma: no cover
+    i128 = int
+    basestring = (bytes, str)
+
+
+def printer(message):
+    print(datetime.now().isoformat(' ') + ' ' + str(message))
+
+
+def debug_printer(message):
+    print("DEBUG:" + datetime.now().isoformat(' ') + ' ' + str(message))
+
+
+# From six
+def add_metaclass(metaclass):
+    """Class decorator for creating a class with a metaclass."""
+    def wrapper(cls):
+        orig_vars = cls.__dict__.copy()
+        slots = orig_vars.get('__slots__')
+        if slots is not None:
+            if isinstance(slots, str):
+                slots = [slots]
+            for slots_var in slots:
+                orig_vars.pop(slots_var)
+        orig_vars.pop('__dict__', None)
+        orig_vars.pop('__weakref__', None)
+        return metaclass(cls.__name__, cls.__bases__, orig_vars)
+    return wrapper
 
 
 def simple_repr(self):  # pragma: no cover
@@ -47,15 +79,16 @@ class Base(object):
 
 class Constant(object):
     """A convenience type meant to be used to instantiate singletons for signaling
-    specific states in return values. Similar to `None`.
+    specific states in return values.
 
     Attributes
     ----------
     name: str
         The name of the constant
     """
-    def __init__(self, name):
+    def __init__(self, name, is_true=True):
         self.name = name
+        self.is_true = is_true
 
     def __eq__(self, other):
         return self.name == str(other)
@@ -67,14 +100,18 @@ class Constant(object):
         return str(self.name)
 
     def __nonzero__(self):
-        return False
+        return self.is_true
+
+    def __bool__(self):
+        return self.is_true
 
 
 class DeconvolutionProcessResult(object):
-    def __init__(self, deconvoluter, peak_set, priorities):
+    def __init__(self, deconvoluter, peak_set, priorities, errors=None):
         self.deconvoluter = deconvoluter
         self.peak_set = peak_set
         self.priorities = priorities
+        self.errors = errors
 
     def __getitem__(self, i):
         if i == 0:
@@ -183,30 +220,6 @@ def dict_proxy(attribute):
     return wrap
 
 
-class PaddedBuffer(object):
-    def __init__(self, content, start='<pad>', end="</pad>"):
-        self.content = content
-        self.start = start
-        self.end = end
-        self.position = 0
-        self.diff = 0
-
-    def read(self, n):
-        if self.position < len(self.start):
-            out = "".join([self.start, self.content.read(n - len(self.start))])
-            self.position += n
-            return out
-        else:
-            out = self.content.read(n)
-            if len(out) < n:
-                diff = n - len(out)
-                if self.diff == 0:
-                    self.diff = diff
-                    self.position += n
-                    return "".join([out, self.end[:diff]])
-                else:
-                    self.position += n
-                    return self.end[self.diff:diff]
-            else:
-                self.position += n
-                return out
+def uid(n=128):
+    int_ = random.getrandbits(n)
+    return int_

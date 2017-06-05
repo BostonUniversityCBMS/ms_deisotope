@@ -18,7 +18,7 @@ cdef bint isclose(double x, double y, double rtol=1.e-5, double atol=1.e-8):
     return abs(x-y) <= (atol + rtol * abs(y))
 
 
-@cython.freelist(500)
+@cython.freelist(50000)
 cdef class IsotopicFitRecord(object):
     """Describes a single isotopic pattern fit, comparing how well an
     experimentally observed sequence of peaks matches a theoretical isotopic
@@ -44,10 +44,10 @@ cdef class IsotopicFitRecord(object):
     seed_peak : FittedPeak
         The peak that was used to initiate the fit. This may be unused
         if not using an Averagine method
-    theoretical : list of TheoreticalPeak
+    theoretical : TheoreticalIsotopicPattern
         The theoretical isotopic pattern being fitted on the experimental data
     """
-    def __cinit__(self, FittedPeak seed_peak, double score, int charge, list theoretical, list experimental,
+    def __init__(self, FittedPeak seed_peak, double score, int charge, TheoreticalIsotopicPattern theoretical, list experimental,
                   object data=None, int missed_peaks=0):
         self.seed_peak = seed_peak
         self.score = score
@@ -58,8 +58,23 @@ cdef class IsotopicFitRecord(object):
         self.data = data
         self.missed_peaks = missed_peaks
 
+    @staticmethod
+    cdef IsotopicFitRecord _create(FittedPeak seed_peak, double score, int charge, TheoreticalIsotopicPattern theoretical,
+                                   list experimental, object data=None, int missed_peaks=0):
+        cdef IsotopicFitRecord inst
+        inst = IsotopicFitRecord.__new__(IsotopicFitRecord)
+        inst.seed_peak = seed_peak
+        inst.score = score
+        inst.charge = charge
+        inst.theoretical = theoretical
+        inst.experimental = experimental
+        inst.monoisotopic_peak = <FittedPeak>PyList_GetItem(experimental, 0)
+        inst.data = data
+        inst.missed_peaks = missed_peaks
+        return inst
+
     def clone(self):
-        return self.__class__(self.seed_peak, self.score, self.charge, self.theoretical,
+        return IsotopicFitRecord._create(self.seed_peak, self.score, self.charge, self.theoretical,
                               self.experimental, self.data, self.missed_peaks)
 
     def __reduce__(self):
@@ -137,16 +152,22 @@ cdef class FitSelectorBase(object):
         return self.__class__, (self.minimum_score,)
 
     cpdef IsotopicFitRecord best(self, object results):
-        return NotImplemented
+        raise NotImplementedError()
 
     def __call__(self, *args, **kwargs):
         return self.best(*args, **kwargs)
 
     cpdef bint reject(self, IsotopicFitRecord result):
-        return NotImplemented
+        raise NotImplementedError()
+
+    cpdef bint reject_score(self, double score):
+        raise NotImplementedError()
 
     cpdef bint is_maximizing(self):
         return False
+
+    def __repr__(self):
+        return "{self.__class__.__name__}(minimum_score={self.minimum_score})".format(self=self)
 
 
 cdef class MinimizeFitSelector(FitSelectorBase):
@@ -180,6 +201,9 @@ cdef class MinimizeFitSelector(FitSelectorBase):
         bool
         """
         return fit.score > self.minimum_score
+
+    cpdef bint reject_score(self, double score):
+        return score > self.minimum_score
 
     cpdef bint is_maximizing(self):
         """Returns that this is *not* a maximizing selector
@@ -223,6 +247,9 @@ cdef class MaximizeFitSelector(FitSelectorBase):
         """
         return fit.score < self.minimum_score
 
+    cpdef bint reject_score(self, double score):
+        return score < self.minimum_score
+
     cpdef bint is_maximizing(self):
         """Returns that this *is* a maximizing selector
 
@@ -259,6 +286,9 @@ cdef class IsotopicFitterBase(object):
     cpdef bint reject(self, IsotopicFitRecord fit):
         return self.select.reject(fit)
 
+    cpdef bint reject_score(self, double score):
+        return self.select.reject_score(score)
+
     cpdef bint is_maximizing(self):
         return self.select.is_maximizing()
 
@@ -267,6 +297,9 @@ cdef class IsotopicFitterBase(object):
 
     def configure(self, DeconvoluterBase deconvoluter, **kwargs):
         return self._configure(deconvoluter, kwargs)
+
+    def __repr__(self):
+        return "{self.__class__.__name__}({fields})".format(self=self, fields=self.__getstate__())
 
 
 cdef double sum_intensity_theoretical(list peaklist):
@@ -449,6 +482,9 @@ cdef class MSDeconVFitter(IsotopicFitterBase):
     cdef double score_peak(self, FittedPeak obs, TheoreticalPeak theo, double mass_error_tolerance=0.02, double minimum_signal_to_noise=1) nogil:
         return score_peak(obs, theo, mass_error_tolerance, minimum_signal_to_noise)
 
+    def evaluate(self, PeakIndex peaklist, list observed, list expected, double mass_error_tolerance=0.02):
+        return self._evaluate(peaklist, observed, expected, mass_error_tolerance)
+
     cpdef double _evaluate(self, PeakIndex peaklist, list observed, list expected, double mass_error_tolerance=0.02):
         cdef:
             size_t i, n
@@ -482,11 +518,14 @@ cdef class PenalizedMSDeconVFitter(IsotopicFitterBase):
     def __setstate__(self, state):
         self.select, self.msdeconv, self.penalizer, self.penalty_factor = state
 
+    def evaluate(self, PeakIndex peaklist, list observed, list expected, double mass_error_tolerance=0.02):
+        return self._evaluate(peaklist, observed, expected, mass_error_tolerance)
+
     cpdef double _evaluate(self, PeakIndex peaklist, list observed, list expected, double mass_error_tolerance=0.02):
         cdef:
             double score, penalty
         score = self.msdeconv._evaluate(peaklist, observed, expected, mass_error_tolerance)
-        penalty = self.penalizer._evaluate(peaklist, observed, expected)
+        penalty = abs(self.penalizer._evaluate(peaklist, observed, expected))
         return score * ((1 - penalty * self.penalty_factor))
 
 
@@ -649,6 +688,9 @@ cdef class ScaledPenalizedMSDeconvFitter(IsotopicFitterBase):
         for i in range(len(theoretical)):
             peak = <TheoreticalPeak>PyList_GET_ITEM(theoretical, i)
             peak.intensity *= factor
+
+    def evaluate(self, PeakIndex peaklist, list observed, list expected, double mass_error_tolerance=0.02):
+        return self._evaluate(peaklist, observed, expected, mass_error_tolerance)
 
     cpdef double _evaluate(self, PeakIndex peaklist, list experimental, list theoretical, double mass_error_tolerance=0.02):
         cdef:

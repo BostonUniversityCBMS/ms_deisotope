@@ -3,6 +3,7 @@ import zlib
 
 import numpy as np
 
+from ms_deisotope.peak_set import Envelope, EnvelopePair
 
 COMPRESSION_NONE = 'none'
 COMPRESSION_ZLIB = 'zlib'
@@ -16,7 +17,7 @@ def encode_array(array, compression=COMPRESSION_NONE, dtype=np.float32):
         bytestring = zlib.compress(bytestring)
     else:
         raise ValueError("Unknown compression: %s" % compression)
-    encoded_string = base64.encodestring(bytestring)
+    encoded_string = base64.standard_b64encode(bytestring)
     return encoded_string
 
 
@@ -34,3 +35,33 @@ def decode_array(bytestring, compression=COMPRESSION_NONE, dtype=np.float32):
         raise ValueError("Unknown compression: %s" % compression)
     array = np.fromstring(decoded_string, dtype=dtype)
     return array
+
+
+def envelopes_to_array(envelope_list):
+    collection = []
+    for envelope in envelope_list:
+        collection.append(0)
+        collection.append(0)
+        for pair in envelope:
+            collection.extend(pair)
+    return np.array(collection)
+
+
+def decode_envelopes(array):
+    envelope_list = []
+    current_envelope = []
+    i = 0
+    n = len(array)
+    while i < n:
+        a = array[i]
+        b = array[i + 1]
+        i += 2
+        if a == 0 and b == 0:
+            if current_envelope is not None:
+                if current_envelope:
+                    envelope_list.append(Envelope(current_envelope))
+                current_envelope = []
+        else:
+            current_envelope.append(EnvelopePair(a, b))
+    envelope_list.append(Envelope(current_envelope))
+    return envelope_list

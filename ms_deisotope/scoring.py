@@ -109,13 +109,16 @@ class FitSelectorBase(Base):
         self.minimum_score = minimum_score
 
     def best(self, results):
-        return NotImplemented
+        raise NotImplementedError()
 
     def __call__(self, *args, **kwargs):
         return self.best(*args, **kwargs)
 
     def reject(self, result):
-        return NotImplemented
+        raise NotImplementedError()
+
+    def reject_score(self, score):
+        raise NotImplementedError()
 
     def is_maximizing(self):
         return False
@@ -152,6 +155,9 @@ class MinimizeFitSelector(FitSelectorBase):
         bool
         """
         return fit.score > self.minimum_score
+
+    def reject_score(self, score):
+        return score > self.minimum_score
 
     def is_maximizing(self):
         """Returns that this is *not* a maximizing selector
@@ -194,6 +200,9 @@ class MaximizeFitSelector(FitSelectorBase):
         bool
         """
         return fit.score < self.minimum_score
+
+    def reject_score(self, score):
+        return score < self.minimum_score
 
     def is_maximizing(self):
         """Returns that this *is* a maximizing selector
@@ -350,8 +359,8 @@ class PenalizedMSDeconVFitter(IsotopicFitterBase):
 
     def evaluate(self, peaklist, observed, expected, mass_error_tolerance=0.02, **kwargs):
         score = self.msdeconv.evaluate(
-            observed, expected, mass_error_tolerance)
-        penalty = self.penalizer.evaluate(observed, expected)
+            peaklist, observed, expected, mass_error_tolerance)
+        penalty = abs(self.penalizer.evaluate(peaklist, observed, expected))
         return score * (1 - penalty * self.penalty_factor)
 
 
@@ -426,12 +435,13 @@ try:
     _ScaledGTestFitter = ScaledGTestFitter
     _PenalizedMSDeconVFitter = PenalizedMSDeconVFitter
     _DistinctPatternFitter = DistinctPatternFitter
+
     from ._c.scoring import (
         IsotopicFitRecord, LeastSquaresFitter, MSDeconVFitter,
         ScaledGTestFitter, PenalizedMSDeconVFitter, DistinctPatternFitter,
         ScaledPenalizedMSDeconvFitter)
-except ImportError, e:
-    print e
+except ImportError as e:
+    print(e)
     _c = False
 
 msdeconv = MSDeconVFitter()

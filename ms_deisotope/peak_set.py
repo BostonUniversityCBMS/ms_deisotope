@@ -218,6 +218,17 @@ class DeconvolutedPeakSet(Base):
         self.peaks = peaks
         self._mz_ordered = None
 
+    def reindex(self):
+        """
+        Updates the :attr:`index` of each peak in `self` and updates the
+        sorted order.
+
+        Returns
+        -------
+        self: DeconvolutedPeakSet
+        """
+        self._reindex()
+
     def _reindex(self):
         """
         Updates the :attr:`index` of each peak in `self` and updates the
@@ -326,7 +337,7 @@ def _get_nearest_peak(peaklist, neutral_mass, use_mz=False):
         if (hi - lo) < 5:
             return sweep(lo, hi)
         else:
-            mid = (hi + lo) / 2
+            mid = (hi + lo) // 2
             v = getter(peaklist[mid])
             if abs(v - neutral_mass) < tol:
                 return sweep(lo, hi)
@@ -377,7 +388,7 @@ def binary_search(peak_set, neutral_mass, tolerance, getter=operator.attrgetter(
     hi = len(peak_set)
 
     while hi != lo:
-        mid = (hi + lo) / 2
+        mid = (hi + lo) // 2
         found_peak = peak_set[mid]
         found_mass = getter(found_peak)
 

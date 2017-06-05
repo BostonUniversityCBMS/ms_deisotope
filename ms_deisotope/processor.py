@@ -3,11 +3,11 @@ import logging
 from ms_peak_picker import pick_peaks
 
 from .deconvolution import deconvolute_peaks
-from .data_source.mzml import MzMLLoader
+from .data_source.infer_type import MSFileLoader
 from .data_source.common import ScanBunch
 from .utils import Base
-
-PyteomicsMzMLLoader = MzMLLoader
+from .feature_map import ScanIntervalTree
+from .peak_dependency_network import NoIsotopicClustersError
 
 logger = logging.getLogger("deconvolution_scan_processor")
 
@@ -42,6 +42,7 @@ class PriorityTarget(Base):
     charge : int
         The charge state hint from :attr:`info`
     """
+
     def __init__(self, peak, info, trust_charge_hint=True):
         self.peak = peak
         self.info = info
@@ -109,7 +110,7 @@ class ScanProcessor(Base):
         default loader. Used to populate :attr:`reader`
     loader_type : callable
         A callable, which when passed `data_source` returns an instance of :class:`ScanIterator`.
-        By default, this is :class:`MzMLLoader`. Used to populate :attr:`reader`
+        By default, this is :class:`MSFileLoader`. Used to populate :attr:`reader`
     reader: ScanIterator
         Any object implementing the :class:`ScanIterator` interface, produced by calling
         :attr:`loader_type` on :attr:`data_source`.
@@ -132,21 +133,28 @@ class ScanProcessor(Base):
     trust_charge_hint : bool
         Whether or not to trust the charge provided by the data source when determining
         the charge state of precursor isotopic patterns. Defaults to `True`
+    terminate_on_error: bool
+        Whether or not  to stop processing on an error. Defaults to `True`
     """
+
     def __init__(self, data_source, ms1_peak_picking_args=None,
                  msn_peak_picking_args=None,
                  ms1_deconvolution_args=None, msn_deconvolution_args=None,
                  pick_only_tandem_envelopes=False, precursor_selection_window=1.5,
                  trust_charge_hint=True,
-                 loader_type=MzMLLoader):
+                 loader_type=None,
+                 envelope_selector=None,
+                 terminate_on_error=True):
         if loader_type is None:
-            loader_type = MzMLLoader
+            loader_type = MSFileLoader
 
         self.data_source = data_source
         self.ms1_peak_picking_args = ms1_peak_picking_args or {}
         self.msn_peak_picking_args = msn_peak_picking_args or ms1_peak_picking_args or {}
         self.ms1_deconvolution_args = ms1_deconvolution_args or {}
+        self.ms1_deconvolution_args.setdefault("charge_range", (1, 8))
         self.msn_deconvolution_args = msn_deconvolution_args or {}
+        self.msn_deconvolution_args.setdefault("charge_range", (1, 8))
         self.pick_only_tandem_envelopes = pick_only_tandem_envelopes
         self.precursor_selection_window = precursor_selection_window
         self.trust_charge_hint = trust_charge_hint
@@ -154,6 +162,8 @@ class ScanProcessor(Base):
         self.loader_type = loader_type
 
         self._signal_source = self.loader_type(data_source)
+        self.envelope_selector = envelope_selector
+        self.terminate_on_error = terminate_on_error
 
     @property
     def reader(self):
@@ -166,11 +176,14 @@ class ScanProcessor(Base):
         else:
             peak_mode = 'centroid'
         prec_mz, prec_intensity = precursor_scan.arrays
-        if not self.pick_only_tandem_envelopes:
+        if not self.pick_only_tandem_envelopes and self.envelope_selector is None:
             prec_peaks = pick_peaks(prec_mz, prec_intensity, peak_mode=peak_mode, **self.ms1_peak_picking_args)
         else:
-            chosen_envelopes = [s.precursor_information for s in precursor_scan.product_scans]
-            chosen_envelopes = sorted([(p.mz - 5, p.mz + 10) for p in chosen_envelopes])
+            if self.envelope_selector is None:
+                chosen_envelopes = [s.precursor_information for s in precursor_scan.product_scans]
+                chosen_envelopes = sorted([(p.mz - 5, p.mz + 10) for p in chosen_envelopes])
+            else:
+                chosen_envelopes = self.envelope_selector(precursor_scan)
             prec_peaks = pick_peaks(prec_mz, prec_intensity, peak_mode=peak_mode,
                                     target_envelopes=chosen_envelopes,
                                     **self.ms1_peak_picking_args)
@@ -179,7 +192,6 @@ class ScanProcessor(Base):
         return prec_peaks
 
     def pick_product_scan_peaks(self, product_scan):
-        # logger.info("Picking Product Scan Peaks: %r", product_scan)
         if product_scan.is_profile:
             peak_mode = 'profile'
         else:
@@ -231,13 +243,11 @@ class ScanProcessor(Base):
         product_scans: list of Scan
             As Parameter
         """
-        prec_peaks = None
+        prec_peaks = self.pick_precursor_scan_peaks(precursor_scan)
         priorities = []
 
         for scan in product_scans:
             precursor_ion = scan.precursor_information
-            if prec_peaks is None:
-                prec_peaks = self.pick_precursor_scan_peaks(precursor_scan)
             peak, err = prec_peaks.get_nearest_peak(precursor_ion.mz)
             precursor_ion.peak = peak
             target = PriorityTarget(peak, precursor_ion, self.trust_charge_hint)
@@ -248,8 +258,6 @@ class ScanProcessor(Base):
                         precursor_scan.id))
             else:
                 priorities.append(target)
-        if prec_peaks is None:
-            prec_peaks = self.pick_precursor_scan_peaks(precursor_scan)
 
         return precursor_scan, priorities, product_scans
 
@@ -260,9 +268,27 @@ class ScanProcessor(Base):
         logger.info("Deconvoluting Precursor Scan %r", precursor_scan)
         logger.info("Priorities: %r", priorities)
 
-        dec_peaks, priority_results = deconvolute_peaks(
-            precursor_scan.peak_set, priority_list=priorities,
-            **self.ms1_deconvolution_args)
+        ms1_deconvolution_args = self.ms1_deconvolution_args.copy()
+
+        if precursor_scan.polarity in (1, -1):
+            polarity = precursor_scan.polarity
+            ms1_deconvolution_args['charge_range'] = tuple(
+                polarity * abs(c) for c in ms1_deconvolution_args['charge_range'])
+        try:
+            decon_result = deconvolute_peaks(
+                precursor_scan.peak_set, priority_list=priorities,
+                **ms1_deconvolution_args)
+        except NoIsotopicClustersError as e:
+            logger.info("No isotopic clusters found in %r" % precursor_scan.id)
+            e.scan_id = precursor_scan.id
+            if self.terminate_on_error:
+                raise e
+
+        dec_peaks, priority_results = decon_result
+
+        if decon_result.errors:
+            logger.error("Errors occurred during deconvolution of %s, %r" % (
+                precursor_scan.id, decon_result.errors))
 
         for pr in priority_results:
             if pr is None:
@@ -317,12 +343,25 @@ class ScanProcessor(Base):
         top_charge_state = precursor_ion.extracted_charge
         deconargs = dict(self.msn_deconvolution_args)
         charge_range = list(deconargs.get("charge_range", [1, top_charge_state]))
-        if top_charge_state is not None and top_charge_state != 0:
+        if top_charge_state is not None and top_charge_state != 0 and abs(
+                top_charge_state) < abs(charge_range[1]):
             charge_range[1] = top_charge_state
 
         deconargs["charge_range"] = charge_range
 
-        dec_peaks, _ = deconvolute_peaks(product_scan.peak_set, **deconargs)
+        if product_scan.polarity in (-1, 1):
+            polarity = product_scan.polarity
+            deconargs["charge_range"] = [
+                polarity * abs(c) for c in deconargs["charge_range"]]
+
+        try:
+            dec_peaks, _ = deconvolute_peaks(product_scan.peak_set, **deconargs)
+        except NoIsotopicClustersError as e:
+            logger.info("No Isotopic Clusters found in %r" % product_scan.id)
+            e.scan_id = product_scan.id
+            if self.terminate_on_error:
+                raise e
+
         product_scan.deconvoluted_peak_set = dec_peaks
         return dec_peaks
 
@@ -384,6 +423,9 @@ class ScanProcessor(Base):
         """
         return self.next()
 
+    def __iter__(self):
+        return self
+
     def pack_next(self):
         """As :meth:`next`, except instead of producing :class:`ScanBunch` of
         :class:`Scan` instances, instead it uses :class:`ProcessedScan` to strip away
@@ -411,10 +453,3 @@ class ScanProcessor(Base):
         """
         self.reader.start_from_scan(*args, **kwargs)
         return self
-
-
-class PrecursorSkimmingProcessor(ScanProcessor):
-    def process(self, precursor, products):
-        precursor_scan, priorities, product_scans = self.process_scan_group(precursor, products)
-        self.deconvolute_precursor_scan(precursor_scan, priorities)
-        return precursor_scan, product_scans

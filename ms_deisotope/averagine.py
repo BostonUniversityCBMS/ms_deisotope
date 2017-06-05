@@ -14,6 +14,118 @@ def shift_isotopic_pattern(mz, cluster):
     return cluster
 
 
+class TheoreticalIsotopicPattern(object):
+    def __init__(self, base_tid, truncated_tid=None):
+        if truncated_tid is None:
+            truncated_tid = base_tid
+        self.base_tid = base_tid
+        self.truncated_tid = truncated_tid
+
+    def __getitem__(self, i):
+        return self.truncated_tid[i]
+
+    def __iter__(self):
+        return iter(self.truncated_tid)
+
+    def __len__(self):
+        return len(self.truncated_tid)
+
+    def get(self, i):
+        return self.truncated_tid[i]
+
+    def clone(self):
+        return self.__class__([p.clone() for p in self.base_tid],
+                              [p.clone() for p in self.truncated_tid])
+
+    @property
+    def monoisotopic_mz(self):
+        return self.base_tid[0].mz
+
+    def shift(self, mz, truncated=True):
+        first_peak = self.base_tid[0]
+        for peak in self.base_tid[1:]:
+            delta = peak.mz - first_peak.mz
+            peak.mz = mz + delta
+        first_peak.mz = mz
+
+        if truncated:
+            first_peak = self.truncated_tid[0]
+            for peak in self.truncated_tid[1:]:
+                delta = peak.mz - first_peak.mz
+                peak.mz = mz + delta
+            first_peak.mz = mz
+
+        return self
+
+    def truncate_after(self, truncate_after=0.0):
+        cumsum = 0
+        result = []
+        for peak in self.base_tid:
+            cumsum += peak.intensity
+            result.append(peak)
+            if cumsum >= truncate_after:
+                break
+        for peak in result:
+            peak.intensity *= 1. / cumsum
+        self.truncated_tid = result
+        return self
+
+    def ignore_below(self, ignore_below=0.0):
+        total = 0
+        kept_tid = []
+        for i, p in enumerate(self.truncated_tid):
+            if p.intensity < ignore_below and i > 1:
+                continue
+            else:
+                total += p.intensity
+                kept_tid.append(p.clone())
+        for p in kept_tid:
+            p.intensity /= total
+        self.truncated_tid = kept_tid
+        return self
+
+    def scale(self, experimental_distribution, method='sum'):
+        if method == 'sum':
+            total_abundance = sum(
+                p.intensity for p in experimental_distribution)
+            for peak in self:
+                peak.intensity *= total_abundance
+        elif method == 'max':
+            i, peak = max(enumerate(self),
+                          key=lambda x: x[1].intensity)
+            scale_factor = experimental_distribution[
+                i].intensity / peak.intensity
+            for peak in self:
+                peak.intensity *= scale_factor
+        elif method == "meanscale":
+            scales = 0
+            weights = 0
+            total = 0
+            for i in range(len(experimental_distribution)):
+                epeak = experimental_distribution[i]
+                total += epeak.intensity
+                tpeak = self[i]
+                weights += tpeak.intensity
+                scales += epeak.intensity / tpeak.intensity
+            scale_factor = scales / weights
+            delta = (total - scale_factor) / len(self)
+            for peak in self:
+                peak.intensity *= scale_factor
+                peak.intensity += delta
+
+        return self
+
+    def _scale_raw(self, scale_factor):
+        for peak in self:
+            peak.intensity *= scale_factor
+
+    def __repr__(self):
+        return "TheoreticalIsotopicPattern(%0.4f, charge=%d, (%s))" % (
+            self.base_tid[0].mz,
+            self.base_tid[0].charge,
+            ', '.join("%0.3f" % p.intensity for p in self.truncated_tid))
+
+
 @dict_proxy("base_composition")
 class Averagine(object):
     def __init__(self, base_composition):
@@ -29,7 +141,7 @@ class Averagine(object):
             scaled[elem] = round(count * scale)
 
         scaled_mass = calculate_mass(scaled)
-        delta_hydrogen = int(neutral - scaled_mass)
+        delta_hydrogen = round(scaled_mass - neutral)
         H = scaled["H"]
         if H > delta_hydrogen:
             scaled["H"] = H - delta_hydrogen
@@ -38,16 +150,24 @@ class Averagine(object):
 
         return scaled
 
-    def isotopic_cluster(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.95):
+    def isotopic_cluster(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.95, ignore_below=0.0):
         composition = self.scale(mz, charge, charge_carrier)
-        cumsum = 0
-        result = []
-        for peak in isotopic_variants(composition, charge=charge):
-            cumsum += peak.intensity
-            result.append(peak)
-            if cumsum >= truncate_after:
-                break
-        return shift_isotopic_pattern(mz, result)
+        tid = TheoreticalIsotopicPattern(isotopic_variants(composition, charge=charge))
+        # cumsum = 0
+        # result = []
+        # for peak in isotopic_variants(composition, charge=charge):
+        #     cumsum += peak.intensity
+        #     result.append(peak)
+        #     if cumsum >= truncate_after:
+        #         break
+        # for peak in result:
+        #     peak.intensity *= 1. / cumsum
+        tid.shift(mz, True)
+        if truncate_after < 1.0:
+            tid.truncate_after(truncate_after)
+        if ignore_below > 0:
+            tid.ignore_below(ignore_below)
+        return tid
 
     def __repr__(self):
         return "Averagine(%r)" % self.base_composition
@@ -80,15 +200,17 @@ def add_compositions(a, b):
 
 try:
     _Averagine = Averagine
-    from ms_deisotope._c.averagine import Averagine
-except ImportError, e:
-    print e
+    _TheoreticalIsotopicPattern = TheoreticalIsotopicPattern
+    from ms_deisotope._c.averagine import Averagine, TheoreticalIsotopicPattern
+except ImportError as e:
+    print(e, "averagine")
 
 
 peptide = Averagine({"C": 4.9384, "H": 7.7583, "N": 1.3577, "O": 1.4773, "S": 0.0417})
 glycopeptide = Averagine({"C": 10.93, "H": 15.75, "N": 1.6577, "O": 6.4773, "S": 0.02054})
 glycan = Averagine({'C': 7.0, 'H': 11.8333, 'N': 0.5, 'O': 5.16666})
 permethylated_glycan = Averagine({'C': 12.0, 'H': 21.8333, 'N': 0.5, 'O': 5.16666})
+heparin = Averagine({'H': 10.5, 'C': 6, 'S': 0.5, 'O': 5.5, 'N': 0.5})
 
 
 _neutron_shift = calculate_mass({"C[13]": 1}) - calculate_mass({"C[12]": 1})
@@ -107,16 +229,19 @@ class AveragineCache(object):
         self.averagine = Averagine(averagine)
         self.cache_truncation = cache_truncation
 
-    def has_mz_charge_pair(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.95):
+    def has_mz_charge_pair(self, mz, charge=1, charge_carrier=PROTON, truncate_after=0.95, ignore_below=0.0):
         if self.cache_truncation == 0.0:
             key_mz = mz
         else:
             key_mz = round(mz / self.cache_truncation) * self.cache_truncation
         if (key_mz, charge, charge_carrier) in self.backend:
-            return shift_isotopic_pattern(mz, [p.clone() for p in self.backend[key_mz, charge, charge_carrier]])
+            # return shift_isotopic_pattern(
+            #     mz, [p.clone() for p in self.backend[key_mz, charge, charge_carrier]])
+            return self.backend[key_mz, charge, charge_carrier].clone().shift(mz)
         else:
-            tid = self.averagine.isotopic_cluster(mz, charge, charge_carrier, truncate_after)
-            self.backend[key_mz, charge, charge_carrier] = [p.clone() for p in tid]
+            tid = self.averagine.isotopic_cluster(
+                mz, charge, charge_carrier, truncate_after, ignore_below)
+            self.backend[key_mz, charge, charge_carrier] = tid.clone()
             return tid
 
     isotopic_cluster = has_mz_charge_pair

@@ -6,7 +6,7 @@ cimport cython
 from cpython.tuple cimport PyTuple_GET_ITEM, PyTuple_GetItem, PyTuple_GetSlice, PyTuple_GET_SIZE
 
 from ms_deisotope._c.averagine cimport mass_charge_ratio
-
+from ms_peak_picker._c.peak_set cimport PeakBase
 
 @cython.cdivision
 cdef double ppm_error(double x, double y):
@@ -108,8 +108,8 @@ cdef class Envelope(object):
         return Envelope, (self.pairs,)
 
 
-@cython.freelist(100000)
-cdef class DeconvolutedPeak:
+# @cython.freelist(100000)
+cdef class DeconvolutedPeak(PeakBase):
     """
     Represent a single deconvoluted peak which represents an aggregated isotopic
     pattern collapsed to its monoisotopic peak, with a known charge state
@@ -181,7 +181,7 @@ cdef class DeconvolutedPeak:
     def __hash__(self):
         return hash((self.mz, self.intensity, self.charge))
 
-    def clone(self):
+    cpdef PeakBase clone(self):
         return DeconvolutedPeak(self.neutral_mass, self.intensity, self.charge, self.signal_to_noise,
                                 self.index, self.full_width_at_half_max, self.a_to_a2_ratio,
                                 self.most_abundant_mass, self.average_mass, self.score,
@@ -229,7 +229,7 @@ cdef class DeconvolutedPeakSolution(DeconvolutedPeak):
         self.fit = fit
         super(DeconvolutedPeakSolution, self).__init__(*args, **kwargs)
 
-    def clone(self):
+    cpdef PeakBase clone(self):
         return DeconvolutedPeakSolution(
             self.solution, self.fit, self.neutral_mass, self.intensity, self.charge, self.signal_to_noise,
             self.index, self.full_width_at_half_max, self.a_to_a2_ratio,
@@ -263,6 +263,17 @@ cdef class DeconvolutedPeakSet:
     def __init__(self, peaks):
         self.peaks = tuple(peaks)
         self._mz_ordered = None
+
+    def reindex(self):
+        """
+        Updates the :attr:`index` of each peak in `self` and updates the
+        sorted order.
+
+        Returns
+        -------
+        self: DeconvolutedPeakSet
+        """
+        self._reindex()
 
     def _reindex(self):
         """
@@ -325,16 +336,23 @@ cdef class DeconvolutedPeakSet:
     cdef DeconvolutedPeak getitem(self, size_t i):
         return <DeconvolutedPeak>PyTuple_GET_ITEM(self.peaks, i)
 
-    def all_peaks_for(self, neutral_mass, tolerance=1e-5):
+    def all_peaks_for(self, double neutral_mass, double tolerance=1e-5):
+        cdef:
+            double lo, hi, lo_err, hi_err
+            int lo_ix, hi_ix
+            DeconvolutedPeak lo_peak
+            DeconvolutedPeak hi_peak
         lo = neutral_mass - neutral_mass * tolerance
         hi = neutral_mass + neutral_mass * tolerance
-        lo_peak, lo_err = self.get_nearest_peak(lo)
-        hi_peak, hi_err = self.get_nearest_peak(hi)
-        lo_ix = lo_peak.index.neutral_mass
-        if abs(ppm_error(lo_peak.neutral_mass, neutral_mass)) > tolerance:
+        lo_peak = binary_search_nearest_neutral_mass(self.peaks, lo, &lo_err)
+        hi_peak = binary_search_nearest_neutral_mass(self.peaks, hi, &hi_err)
+        lo_ix = lo_peak._index.neutral_mass
+        if lo_ix < PyTuple_GET_SIZE(self.peaks) and abs(
+                ppm_error(lo_peak.neutral_mass, neutral_mass)) > tolerance:
             lo_ix += 1
-        hi_ix = hi_peak.index.neutral_mass + 1
-        if abs(ppm_error(hi_peak.neutral_mass, neutral_mass)) > tolerance:
+        hi_ix = hi_peak._index.neutral_mass + 1
+        if hi_ix != 0 and abs(
+                ppm_error(hi_peak.neutral_mass, neutral_mass)) > tolerance:
             hi_ix -= 1
         return self[lo_ix:hi_ix]
 
@@ -414,7 +432,7 @@ cdef DeconvolutedPeak binary_search_neutral_mass(tuple peak_set, double neutral_
         DeconvolutedPeak found_peak
 
     lo = 0
-    hi = len(peak_set)
+    hi = PyTuple_GET_SIZE(peak_set)
 
     while hi != lo:
         mid = (hi + lo) / 2
@@ -547,3 +565,32 @@ def convert(self):
         self.a_to_a2_ratio, self.most_abundant_mass, self.average_mass,
         self.score, Envelope(self.envelope), self.mz, None, self.chosen_for_msms,
         self.area)
+
+
+cimport numpy as np
+
+
+def decode_envelopes(_array):
+    cdef:
+        np.ndarray array
+        list envelope_list, current_envelope
+        size_t i, n
+        object a, b
+    envelope_list = []
+    current_envelope = []
+    array = _array
+    i = 0
+    n = len(array)
+    while i < n:
+        a = array[i]
+        b = array[i + 1]
+        i += 2
+        if a == 0 and b == 0:
+            if current_envelope is not None:
+                if current_envelope:
+                    envelope_list.append(Envelope(current_envelope))
+                current_envelope = []
+        else:
+            current_envelope.append(EnvelopePair(a, b))
+    envelope_list.append(Envelope(current_envelope))
+    return envelope_list
