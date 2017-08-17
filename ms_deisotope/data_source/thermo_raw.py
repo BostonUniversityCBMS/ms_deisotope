@@ -43,8 +43,6 @@ try:
             return True
         except ImportError:
             return False
-
-
 except ImportError as e:
     message = str(e)
 
@@ -250,6 +248,9 @@ class ThermoRawLoader(ThermoRawDataInterface, RandomAccessScanSource, ScanIterat
         self._first_scan_time = self.get_scan_by_index(0).scan_time
         self._last_scan_time = self.get_scan_by_id(self._source.LastSpectrumNumber).scan_time
 
+    def __reduce__(self):
+        return self.__class__, (self.source_file,)
+
     @property
     def index(self):
         return self._index
@@ -349,9 +350,9 @@ class ThermoRawLoader(ThermoRawDataInterface, RandomAccessScanSource, ScanIterat
 
     def start_from_scan(self, scan_id=None, rt=None, index=None, require_ms1=True):
         if scan_id is not None:
-            scan_number = int(str(scan_id).replace(_id_template, ''))
+            scan_number = int(str(scan_id).replace(_id_template, '')) - 1
         elif index is not None:
-            scan_number = int(index) + 1
+            scan_number = int(index)
         elif rt is not None:
             start_index = self._source.ScanNumFromRT(rt)
             if require_ms1:
@@ -367,15 +368,15 @@ class ThermoRawLoader(ThermoRawDataInterface, RandomAccessScanSource, ScanIterat
                 start_index=scan_number))
         return self
 
-    def make_iterator(self, iterator=None, grouped=True):
-        if grouped:
-            self._producer = self._scan_group_iterator(iterator)
-        else:
-            self._producer = self._single_scan_iterator(iterator)
+    # def make_iterator(self, iterator=None, grouped=True):
+    #     if grouped:
+    #         self._producer = self._scan_group_iterator(iterator)
+    #     else:
+    #         self._producer = self._single_scan_iterator(iterator)
 
     def _make_scan_index_producer(self, start_index=None, start_time=None):
         if start_index is not None:
-            return range(start_index + 1, self._source.NumSpectra)
+            return range(start_index + 1, self._source.NumSpectra + 1)
         elif start_time is not None:
             start_index = self._source.ScanNumFromRT(start_time)
             while start_index != 1:
@@ -384,9 +385,9 @@ class ThermoRawLoader(ThermoRawDataInterface, RandomAccessScanSource, ScanIterat
                     start_index -= 1
                 else:
                     break
-            return range(start_index, self._source.NumSpectra)
+            return range(start_index, self._source.NumSpectra + 1)
         else:
-            return range(1, self._source.NumSpectra)
+            return range(1, self._source.NumSpectra + 1)
 
     def _single_scan_iterator(self, iterator=None):
         if iterator is None:
@@ -408,9 +409,13 @@ class ThermoRawLoader(ThermoRawDataInterface, RandomAccessScanSource, ScanIterat
         for ix in iterator:
             packed = self.get_scan_by_id(ix)
             self._scan_cache[packed._data.scan_number] = packed
-            if packed.ms_level == 2:
-                if current_level < 2:
-                    current_level = 2
+            if packed.ms_level > 1:
+                # inceasing ms level
+                if current_level < packed.ms_level:
+                    current_level = packed.ms_level
+                # decreasing ms level
+                elif current_level > packed.ms_level:
+                    current_level = packed.ms_level.ms_level
                 product_scans.append(packed)
             elif packed.ms_level == 1:
                 if current_level > 1 and precursor_scan is not None:

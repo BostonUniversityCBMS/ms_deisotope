@@ -5,7 +5,21 @@ from ms_peak_picker import pick_peaks
 from ..averagine import neutral_mass, mass_charge_ratio
 from ..utils import Constant, add_metaclass
 
-ScanBunch = namedtuple("ScanBunch", ["precursor", "products"])
+
+class ScanBunch(namedtuple("ScanBunch", ["precursor", "products"])):
+
+    def __new__(cls, *args, **kwargs):
+        inst = super(ScanBunch, cls).__new__(cls, *args, **kwargs)
+        inst._id_map = {
+            inst.precursor.id: inst.precursor
+        }
+        for scan in inst.products:
+            inst._id_map[scan.id] = scan
+        return inst
+
+    def precursor_for(self, scan):
+        scan_id = scan.precursor_information.precursor_scan_id
+        return self._id_map[scan_id]
 
 
 def _repr_pretty_(scan_bunch, p, cycle):  # pragma: no cover
@@ -250,6 +264,66 @@ class ScanIterator(ScanDataSource):
     def reset(self):
         raise NotImplementedError()
 
+    def _make_default_iterator(self):
+        raise NotImplementedError()
+
+    def make_iterator(self, iterator=None, grouped=True):
+        if grouped:
+            self._producer = self._scan_group_iterator(iterator)
+        else:
+            self._producer = self._single_scan_iterator(iterator)
+
+    def _single_scan_iterator(self, iterator=None):
+        if iterator is None:
+            iterator = self._make_default_iterator()
+
+        _make_scan = self._make_scan
+
+        for scan in iterator:
+            packed = _make_scan(scan)
+            if not self._validate(packed):
+                continue
+            self._scan_cache[packed.id] = packed
+            yield packed
+
+    def _scan_group_iterator(self, iterator=None):
+        if iterator is None:
+            iterator = self._make_default_iterator()
+        precursor_scan = None
+        product_scans = []
+
+        current_level = 1
+
+        _make_scan = self._make_scan
+
+        for scan in iterator:
+            packed = _make_scan(scan)
+            if not self._validate(packed):
+                continue
+            self._scan_cache[packed.id] = packed
+            if packed.ms_level > 1:
+                # inceasing ms level
+                if current_level < packed.ms_level:
+                    current_level = packed.ms_level
+                # decreasing ms level
+                elif current_level > packed.ms_level:
+                    current_level = packed.ms_level.ms_level
+                product_scans.append(packed)
+            elif packed.ms_level == 1:
+                if current_level > 1:
+                    precursor_scan.product_scans = list(product_scans)
+                    yield ScanBunch(precursor_scan, product_scans)
+                else:
+                    if precursor_scan is not None:
+                        precursor_scan.product_scans = list(product_scans)
+                        yield ScanBunch(precursor_scan, product_scans)
+                precursor_scan = packed
+                product_scans = []
+            else:
+                raise ValueError("Could not interpret MS Level %r" % (packed.ms_level,))
+        if precursor_scan is not None:
+            yield ScanBunch(precursor_scan, product_scans)
+
 
 @add_metaclass(abc.ABCMeta)
 class RandomAccessScanSource(ScanDataSource):
@@ -467,6 +541,10 @@ class Scan(object):
         return self._id
 
     @property
+    def scan_id(self):
+        return self.id
+
+    @property
     def index(self):
         if self._index is None:
             self._index = self.source._scan_index(self._data)
@@ -489,8 +567,8 @@ class Scan(object):
         return self._activation
 
     def __repr__(self):
-        return "Scan(%r, index=%d, time=%0.4f%s)" % (
-            self.id, self.index, self.scan_time,
+        return "Scan(%r, index=%d, time=%0.4f, ms_level=%r%s)" % (
+            self.id, self.index, self.scan_time, self.ms_level,
             ", " + repr(self.precursor_information) if self.precursor_information else '')
 
     def pick_peaks(self, *args, **kwargs):
@@ -649,6 +727,10 @@ class ProcessedScan(object):
         self.deconvoluted_peak_set = deconvoluted_peak_set
         self.polarity = polarity
         self.activation = activation
+
+    @property
+    def scan_id(self):
+        return self.id
 
     def __iter__(self):
         return iter(self.deconvoluted_peak_set)

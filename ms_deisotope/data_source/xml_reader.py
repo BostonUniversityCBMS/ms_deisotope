@@ -1,8 +1,13 @@
+import json
+import os
+import tempfile
+
 from weakref import WeakValueDictionary
 from .common import (
     PrecursorInformation, ScanIterator, ScanDataSource, RandomAccessScanSource,
     ChargeNotProvided, ScanBunch, ActivationInformation)
 from lxml.etree import XMLSyntaxError
+from pyteomics import xml
 
 
 class XMLReaderBase(RandomAccessScanSource, ScanIterator):
@@ -38,52 +43,8 @@ class XMLReaderBase(RandomAccessScanSource, ScanIterator):
     def _validate(self, scan):
         raise NotImplementedError()
 
-    def _single_scan_iterator(self, iterator=None):
-        if iterator is None:
-            iterator = iter(self._source)
-
-        _make_scan = self._make_scan
-
-        for scan in iterator:
-            packed = _make_scan(scan)
-            if not self._validate(packed):
-                continue
-            self._scan_cache[packed.id] = packed
-            yield packed
-
-    def _scan_group_iterator(self, iterator=None):
-        if iterator is None:
-            iterator = iter(self._source)
-        precursor_scan = None
-        product_scans = []
-
-        current_level = 1
-
-        _make_scan = self._make_scan
-
-        for scan in iterator:
-            packed = _make_scan(scan)
-            if not self._validate(packed):
-                continue
-            self._scan_cache[packed.id] = packed
-            if packed.ms_level == 2:
-                if current_level < 2:
-                    current_level = 2
-                product_scans.append(packed)
-            elif packed.ms_level == 1:
-                if current_level > 1:
-                    precursor_scan.product_scans = list(product_scans)
-                    yield ScanBunch(precursor_scan, product_scans)
-                else:
-                    if precursor_scan is not None:
-                        precursor_scan.product_scans = list(product_scans)
-                        yield ScanBunch(precursor_scan, product_scans)
-                precursor_scan = packed
-                product_scans = []
-            else:
-                raise Exception("This object is not able to handle MS levels higher than 2")
-        if precursor_scan is not None:
-            yield ScanBunch(precursor_scan, product_scans)
+    def _make_default_iterator(self):
+        return iter(self._source)
 
     def next(self):
         try:
@@ -216,3 +177,61 @@ class XMLReaderBase(RandomAccessScanSource, ScanIterator):
 
     def __reduce__(self):
         return self.__class__, (self.source_file, self._use_index)
+
+
+def save_byte_index(index, fp):
+    encoded_index = dict()
+    for key, offset in index.items():
+        encoded_index[key.decode("utf8")] = offset
+    json.dump(encoded_index, fp)
+    return fp
+
+
+def load_byte_index(fp):
+    data = json.load(fp)
+    index = xml.ByteEncodingOrderedDict()
+    for key, value in sorted(data.items(), key=lambda x: x[1]):
+        index[key] = value
+    return index
+
+
+class PrebuiltOffsetIndex(xml.FlatTagSpecificXMLByteIndex):
+    def __init__(self, offsets):
+        self.offsets = offsets
+
+
+class IndexSavingXML(xml.IndexedXML):
+
+    _save_byte_index_to_file = staticmethod(save_byte_index)
+    _load_byte_index_from_file = staticmethod(load_byte_index)
+
+    @property
+    def _byte_offset_filename(self):
+        path = self._source.name
+        byte_offset_filename = os.path.splitext(path)[0] + '-byte-offsets.json'
+        return byte_offset_filename
+
+    def _check_has_byte_offset_file(self):
+        path = self._byte_offset_filename
+        return os.path.exists(path)
+
+    def _read_byte_offsets(self):
+        with open(self._byte_offset_filename, 'r') as f:
+            index = PrebuiltOffsetIndex(self._load_byte_index_from_file(f))
+            self._offset_index = index
+
+    def _write_byte_offsets(self):
+        with open(self._byte_offset_filename, 'w') as f:
+            self._save_byte_index_to_file(self._offset_index, f)
+
+    @xml._keepstate
+    def _build_index(self):
+        try:
+            self._read_byte_offsets()
+        except IOError as e:
+            super(IndexSavingXML, self)._build_index()
+
+    @classmethod
+    def prebuild_byte_offset_file(cls, path):
+        inst = cls(path, use_index=True)
+        inst._write_byte_offsets()

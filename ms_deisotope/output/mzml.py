@@ -12,6 +12,12 @@ except ImportError:
     print("MzMLWriter not available.")
     writer = None
 
+try:
+    WindowsError
+    on_windows = True
+except NameError:
+    on_windows = False
+
 from .common import ScanSerializerBase, ScanDeserializerBase
 from .text_utils import (envelopes_to_array, decode_envelopes)
 from ms_deisotope import peak_set
@@ -377,10 +383,14 @@ class MzMLScanSerializer(ScanSerializerBase):
                 pass
 
     def format(self):
-        self.writer.format()
+        try:
+            self.writer.format()
+        except OSError as e:
+            if on_windows and e.errno == 32:
+                pass
 
 
-def marshal_deconvoluted_peak_set(scan_dict):
+def deserialize_deconvoluted_peak_set(scan_dict):
     envelopes = decode_envelopes(scan_dict["isotopic envelopes array"])
     peaks = []
     mz_array = scan_dict['m/z array']
@@ -402,7 +412,7 @@ def marshal_deconvoluted_peak_set(scan_dict):
     return peaks
 
 
-def marshal_peak_set(scan_dict):
+def deserialize_peak_set(scan_dict):
     mz_array = scan_dict['m/z array']
     intensity_array = scan_dict['intensity array']
     n = len(scan_dict['m/z array'])
@@ -430,26 +440,30 @@ class ProcessedMzMLDeserializer(MzMLLoader, ScanDeserializerBase):
     """
     def __init__(self, source_file, use_index=True):
         MzMLLoader.__init__(self, source_file, use_index=use_index)
-        self.extended_index = ExtendedScanIndex()
+        self.extended_index = None
         self._scan_id_to_rt = dict()
         self._sample_run = None
         if self._use_index:
             try:
-                if os.path.exists(self._index_file_name):
-                    self.read_index()
+                if self.has_index_file():
+                    self.read_index_file()
+                else:
+                    self.build_extended_index()
             except IOError:
                 pass
             except ValueError:
                 pass
-            if self.extended_index:
-                for key in self.extended_index.ms1_ids:
-                    self._scan_id_to_rt[key] = self.extended_index.ms1_ids[key]['scan_time']
-                for key in self.extended_index.msn_ids:
-                    self._scan_id_to_rt[key] = self.extended_index.msn_ids[key]['scan_time']
+            self._build_scan_id_to_rt_cache()
 
-    def read_index(self):
+    def read_index_file(self):
         with open(self._index_file_name) as handle:
             self.extended_index = ExtendedScanIndex.deserialize(handle)
+
+    deserialize_deconvoluted_peak_set = staticmethod(deserialize_deconvoluted_peak_set)
+    deserialize_peak_set = staticmethod(deserialize_peak_set)
+
+    def has_index_file(self):
+        return os.path.exists(self._index_file_name)
 
     def _make_sample_run(self):
         samples = self.samples()
@@ -561,13 +575,13 @@ class ProcessedMzMLDeserializer(MzMLLoader, ScanDeserializerBase):
             scan.precursor_information.default()
         if "isotopic envelopes array" in data:
             scan.peak_set = PeakIndex(np.array([]), np.array([]), PeakSet([]))
-            scan.deconvoluted_peak_set = marshal_deconvoluted_peak_set(data)
+            scan.deconvoluted_peak_set = deserialize_deconvoluted_peak_set(data)
             if scan.id in self.extended_index.ms1_ids:
                 chosen_indices = self.extended_index.ms1_ids[scan.id]['msms_peaks']
                 for ix in chosen_indices:
                     scan.deconvoluted_peak_set[ix].chosen_for_msms = True
         else:
-            scan.peak_set = marshal_peak_set(data)
+            scan.peak_set = deserialize_peak_set(data)
             scan.deconvoluted_peak_set = None
         return scan.pack()
 
@@ -578,6 +592,13 @@ class ProcessedMzMLDeserializer(MzMLLoader, ScanDeserializerBase):
         except KeyError:
             header = self.get_scan_header_by_id(scan_id)
             return header.scan_time
+
+    def _build_scan_id_to_rt_cache(self):
+        if self.extended_index:
+            for key in self.extended_index.ms1_ids:
+                self._scan_id_to_rt[key] = self.extended_index.ms1_ids[key]['scan_time']
+            for key in self.extended_index.msn_ids:
+                self._scan_id_to_rt[key] = self.extended_index.msn_ids[key]['scan_time']
 
     # LC-MS/MS Database API
 
@@ -597,12 +618,12 @@ class ProcessedMzMLDeserializer(MzMLLoader, ScanDeserializerBase):
             out.append(pinfo)
         return out
 
-    def ms1_peaks_above(self, threshold=1000.):
+    def ms1_peaks_above(self, mass_threshold=500, intensity_threshold=1000.):
         accumulate = []
         for ms1_id in self.extended_index.ms1_ids:
             scan = self.get_scan_by_id(ms1_id)
             for peak in scan.deconvoluted_peak_set:
-                if peak.intensity < threshold:
+                if peak.intensity < intensity_threshold or peak.neutral_mass < mass_threshold:
                     continue
                 accumulate.append((ms1_id, peak, id(peak)))
         return accumulate
@@ -626,3 +647,11 @@ class ProcessedMzMLDeserializer(MzMLLoader, ScanDeserializerBase):
                 if valid:
                     out.append(pinfo)
         return out
+
+
+try:
+    has_c = True
+    _deserialize_deconvoluted_peak_set = deserialize_deconvoluted_peak_set
+    from ms_deisotope._c.utils import deserialize_deconvoluted_peak_set
+except ImportError:
+    has_c = False

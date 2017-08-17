@@ -3,8 +3,12 @@ from pyteomics import mzxml
 from .common import (
     PrecursorInformation, ScanDataSource, ChargeNotProvided,
     ActivationInformation)
-from .xml_reader import XMLReaderBase
+from .xml_reader import XMLReaderBase, IndexSavingXML
 from weakref import WeakValueDictionary
+
+
+class _MzXMLParser(mzxml.MzXML, IndexSavingXML):
+    pass
 
 
 class MzXMLDataInterface(ScanDataSource):
@@ -169,29 +173,32 @@ class MzXMLDataInterface(ScanDataSource):
     def _is_profile(self, scan):
         """Returns whether the scan contains profile data (`True`)
         or centroided data (`False`).
-        
+
         Parameters
         ----------
         scan : Mapping
             The underlying scan information storage,
             usually a `dict`
-        
+
         Returns
         -------
         bool
         """
-        return not bool(int(scan['centroided']))
+        try:
+            return not bool(int(scan['centroided']))
+        except KeyError:
+            return True
 
     def _polarity(self, scan):
         """Returns whether this scan was acquired in positive mode (+1)
         or negative mode (-1).
-        
+
         Parameters
         ----------
         scan : Mapping
             The underlying scan information storage,
             usually a `dict`
-        
+
         Returns
         -------
         int
@@ -206,13 +213,13 @@ class MzXMLDataInterface(ScanDataSource):
         produce this scan, if any.
 
         Returns `None` for MS1 scans
-        
+
         Parameters
         ----------
         scan : Mapping
             The underlying scan information storage,
             usually a `dict`
-        
+
         Returns
         -------
         ActivationInformation
@@ -235,11 +242,14 @@ class MzXMLLoader(MzXMLDataInterface, XMLReaderBase):
     source: pyteomics.mzxml.MzXML
         Underlying scan data source
     """
-    __data_interface__ = MzXMLDataInterface
+
+    @staticmethod
+    def prebuild_byte_offset_file(path):
+        return _MzXMLParser.prebuild_byte_offset_file(path)
 
     def __init__(self, source_file, use_index=True):
         self.source_file = source_file
-        self._source = mzxml.MzXML(source_file, read_schema=True, iterative=True, use_index=use_index)
+        self._source = _MzXMLParser(source_file, read_schema=True, iterative=True, use_index=use_index)
         self._producer = self._scan_group_iterator()
         self._scan_cache = WeakValueDictionary()
         self._use_index = use_index

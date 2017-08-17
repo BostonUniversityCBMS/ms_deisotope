@@ -1,3 +1,5 @@
+cimport cython
+
 from ms_peak_picker._c.peak_index cimport PeakIndex
 from ms_peak_picker._c.peak_set cimport PeakSet, FittedPeak
 from brainpy._c.isotopic_distribution cimport TheoreticalPeak
@@ -21,7 +23,10 @@ cdef class DeconvoluterBase(object):
 
     cpdef PeakSet between(self, double m1, double m2)
     cpdef FittedPeak has_peak(self, double mz, double error_tolerance)
+    cdef FittedPeak _has_peak(self, double mz, double error_tolerance)
+
     cpdef list match_theoretical_isotopic_distribution(self, list theoretical_distribution, double error_tolerance=*)
+
     cpdef scale_theoretical_distribution(self, TheoreticalIsotopicPattern theoretical_distribution, list experimental_distribution)
     cpdef subtraction(self, TheoreticalIsotopicPattern isotopic_cluster, double error_tolerance=*)
     cpdef list _find_next_putative_peak(self, double mz, int charge, int step=*, double tolerance=*)
@@ -52,3 +57,9 @@ cdef class MultiAveragineDeconvoluterBase(DeconvoluterBase):
 
 
 cdef bint has_multiple_real_peaks(list peaklist)
+
+
+cpdef set _get_all_peak_charge_pairs(DeconvoluterBase self, FittedPeak peak, double error_tolerance=*,
+                                 object charge_range=*,
+                                 int left_search_limit=*, int right_search_limit=*, bint use_charge_state_hint=*,
+                                 bint recalculate_starting_peak=*)

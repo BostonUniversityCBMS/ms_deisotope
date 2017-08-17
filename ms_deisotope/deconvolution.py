@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 import operator
+import logging
+
+from ms_peak_picker import FittedPeak
 
 from .averagine import (
     AveragineCache, peptide, glycopeptide, glycan, neutral_mass, isotopic_variants,
@@ -9,21 +12,18 @@ from .scoring import IsotopicFitRecord, penalized_msdeconv
 from .utils import range, Base, TrivialTargetedDeconvolutionResult, DeconvolutionProcessResult
 from .envelope_statistics import a_to_a2_ratio, average_mz, most_abundant_mz
 from .peak_dependency_network import PeakDependenceGraph, NetworkedTargetedDeconvolutionResult
-
-from ms_peak_picker import FittedPeak
-
-import logging
+from .constants import (
+    TRUNCATE_AFTER,
+    MAX_ITERATION,
+    ERROR_TOLERANCE,
+    IGNORE_BELOW,
+    CONVERGENCE,
+    SCALE_METHOD)
 
 logger = logging.getLogger("deconvolution")
 info = logger.info
 debug = logger.debug
-
-
-TRUNCATE_AFTER = 0.95
-MAX_ITERATION = 10
-ERROR_TOLERANCE = 2e-5
-IGNORE_BELOW = 0.01
-CONVERGENCE = 1e-3
+error = logger.error
 
 
 def mean(numbers):
@@ -630,6 +630,7 @@ class ExhaustivePeakSearchDeconvoluterBase(object):
                     continue
                 target_peaks.add((nxt_peak, charge))
 
+
                 if recalculate_starting_peak:
                     target_peaks.update(self._find_next_putative_peak(
                         peak.mz, charge, i, 2 * error_tolerance))
@@ -812,7 +813,7 @@ class ExhaustivePeakSearchDeconvoluterBase(object):
             most_abundant_mass=neutral_mass(most_abundant_mz(eid), charge),
             average_mass=neutral_mass(average_mz(eid), charge),
             score=score,
-            envelope=[(p.mz, p.intensity) for p in rep_eid],
+            envelope=[(p.mz, p.intensity) for p in eid],
             mz=tid.monoisotopic_mz,
             fit=fit,
             area=sum(e.area for e in eid))
@@ -925,6 +926,14 @@ class ExhaustivePeakSearchDeconvoluterBase(object):
                 self._deconvoluted_peaks)
 
         return DeconvolutedPeakSet(self._deconvoluted_peaks)._reindex()
+
+
+try:
+    from ms_deisotope._c.deconvoluter_base import (
+        _get_all_peak_charge_pairs as _c_get_all_peak_charge_pairs)
+    ExhaustivePeakSearchDeconvoluterBase._get_all_peak_charge_pairs = _c_get_all_peak_charge_pairs
+except ImportError as e:
+    pass
 
 
 class AveragineDeconvoluter(AveragineDeconvoluterBase, ExhaustivePeakSearchDeconvoluterBase):
@@ -1213,7 +1222,7 @@ class PeakDependenceGraphDeconvoluterBase(ExhaustivePeakSearchDeconvoluterBase):
             the overall shape of the isotopic pattern.
         """
         for peak in self.peaklist:
-            if peak in self._priority_map:
+            if peak in self._priority_map or peak.intensity < self.minimum_intensity:
                 continue
             out = self._explore_local(
                 peak, error_tolerance=error_tolerance, charge_range=charge_range,
@@ -1266,7 +1275,7 @@ class PeakDependenceGraphDeconvoluterBase(ExhaustivePeakSearchDeconvoluterBase):
                         most_abundant_mz(eid), charge),
                     average_mass=neutral_mass(average_mz(eid), charge),
                     score=score,
-                    envelope=[(p.mz, p.intensity) for p in rep_eid],
+                    envelope=[(p.mz, p.intensity) for p in eid],
                     mz=tid.monoisotopic_mz, fit=fit,
                     area=sum(e.area for e in eid))
 
@@ -1685,7 +1694,7 @@ class CompositionListPeakDependenceGraphDeconvoluter(CompositionListDeconvoluter
                         most_abundant_mz(eid), charge),
                     average_mass=neutral_mass(average_mz(eid), charge),
                     score=score,
-                    envelope=[(p.mz, p.intensity) for p in rep_eid],
+                    envelope=[(p.mz, p.intensity) for p in eid],
                     mz=monoisotopic_mz, area=sum(e.area for e in eid))
 
                 self._save_peak_solution(peak)
@@ -1769,6 +1778,7 @@ def deconvolute_peaks(peaklist,
     decon_config = decon_config or {}
     decon_config.update(kwargs)
     decon_config.setdefault("use_subtraction", True)
+    decon_config.setdefault("scale_method", SCALE_METHOD)
     decon = deconvoluter_type(peaklist=peaklist, **decon_config)
 
     if verbose_priorities or verbose:
@@ -1809,7 +1819,7 @@ def deconvolute_peaks(peaklist,
         except ValueError as e:
             result = None
             errors.append(e)
-            logger.info("Could not extract a solution for %r", pr.query_peak, exc_info=True)
+            logger.error("Could not extract a solution for %r", pr.query_peak, exc_info=True)
         acc.append(result)
 
     priority_list_results = acc

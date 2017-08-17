@@ -4,13 +4,21 @@ from .common import (
     PrecursorInformation, ScanDataSource,
     ChargeNotProvided, ActivationInformation)
 from weakref import WeakValueDictionary
-from .xml_reader import XMLReaderBase
+from .xml_reader import XMLReaderBase, IndexSavingXML
+
+
+class _MzMLParser(mzml.MzML, IndexSavingXML):
+    pass
 
 
 class MzMLDataInterface(ScanDataSource):
     """Provides implementations of all of the methods needed to implement the
     :class:`ScanDataSource` for mzML files. Not intended for direct instantiation.
     """
+
+    def _stray_cvs(self, scan):
+        return scan.get("name", [])
+
     def _scan_arrays(self, scan):
         """Returns raw data arrays for m/z and intensity
 
@@ -53,6 +61,17 @@ class MzMLDataInterface(ScanDataSource):
             precursor_scan_id = scan["precursorList"]['precursor'][0]['spectrumRef']
         except KeyError:
             precursor_scan_id = None
+            last_index = self._scan_index(scan) - 1
+            current_level = self._ms_level(scan)
+            i = 0
+            while last_index > 0 and i < 100:
+                prev_scan = self.get_scan_by_index(last_index)
+                if prev_scan.ms_level >= current_level:
+                    last_index -= 1
+                else:
+                    precursor_scan_id = self._scan_id(prev_scan)
+                    break
+                i += 1
         pinfo = PrecursorInformation(
             mz=pinfo_dict['selected ion m/z'],
             intensity=pinfo_dict.get('peak intensity', 0.0),
@@ -158,7 +177,7 @@ class MzMLDataInterface(ScanDataSource):
         try:
             return scan['scanList']['scan'][0]['scan start time']
         except KeyError:
-            return None
+            return 0.0
 
     def _is_profile(self, scan):
         """Returns whether the scan contains profile data (`True`)
@@ -174,7 +193,7 @@ class MzMLDataInterface(ScanDataSource):
         -------
         bool
         """
-        return "profile spectrum" in scan
+        return "profile spectrum" in scan or "profile spectrum" in self._stray_cvs(scan)
 
     def _polarity(self, scan):
         """Returns whether this scan was acquired in positive mode (+1)
@@ -190,9 +209,9 @@ class MzMLDataInterface(ScanDataSource):
         -------
         int
         """
-        if "positive scan" in scan:
+        if "positive scan" in scan or "positive scan" in self._stray_cvs(scan):
             return 1
-        elif "negative scan" in scan:
+        elif "negative scan" in scan or "negative scan" in self._stray_cvs(scan):
             return -1
 
     def _activation(self, scan):
@@ -233,26 +252,7 @@ def _find_section(source, section):
     return value
 
 
-class MzMLLoader(MzMLDataInterface, XMLReaderBase):
-    """Reads scans from PSI-HUPO mzML XML files. Provides both iterative and
-    random access.
-
-    Attributes
-    ----------
-    source_file: str
-        Path to file to read from.
-    source: pyteomics.mzml.MzML
-        Underlying scan data source
-    """
-    __data_interface__ = MzMLDataInterface
-
-    def __init__(self, source_file, use_index=True):
-        self.source_file = source_file
-        self._source = mzml.MzML(source_file, read_schema=True, iterative=True, use_index=use_index)
-        self._producer = self._scan_group_iterator()
-        self._scan_cache = WeakValueDictionary()
-        self._use_index = use_index
-
+class _MzMLMetadataLoader(object):
     def file_description(self):
         return _find_section(self._source, "fileDescription")
 
@@ -264,6 +264,30 @@ class MzMLLoader(MzMLDataInterface, XMLReaderBase):
 
     def samples(self):
         return _find_section(self._source, "sampleList")
+
+
+class MzMLLoader(MzMLDataInterface, XMLReaderBase, _MzMLMetadataLoader):
+    """Reads scans from PSI-HUPO mzML XML files. Provides both iterative and
+    random access.
+
+    Attributes
+    ----------
+    source_file: str
+        Path to file to read from.
+    source: pyteomics.mzml.MzML
+        Underlying scan data source
+    """
+
+    @staticmethod
+    def prebuild_byte_offset_file(path):
+        return _MzMLParser.prebuild_byte_offset_file(path)
+
+    def __init__(self, source_file, use_index=True):
+        self.source_file = source_file
+        self._source = _MzMLParser(source_file, read_schema=True, iterative=True, use_index=use_index)
+        self._producer = self._scan_group_iterator()
+        self._scan_cache = WeakValueDictionary()
+        self._use_index = use_index
 
     def _validate(self, scan):
         return "m/z array" in scan._data
